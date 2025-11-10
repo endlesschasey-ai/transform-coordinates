@@ -131,6 +131,7 @@ class AsyncCoordinateTransformer:
         self.failed_requests = 0
         self.successful_requests = 0
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.rate_limit_backoff = 1.0  # 速率限制退避时间（秒）
 
     async def transform_coordinate(
         self,
@@ -152,7 +153,7 @@ class AsyncCoordinateTransformer:
             ((x, y), (lon, lat)) 元组，失败则返回 ((x, y), None)
         """
         async with self.semaphore:  # 限制并发数
-            for _ in range(max_retries):
+            for retry in range(max_retries):
                 try:
                     # 获取当前 API KEY
                     current_key = self.api_key_manager.get_current_key()
@@ -188,20 +189,27 @@ class AsyncCoordinateTransformer:
                                 return ((x, y), None)
 
                         elif response.status == 429:
-                            # 遇到速率限制，尝试切换 API KEY
-                            logger.warning(f"⚠ 速率限制 (429) for ({x}, {y})")
+                            # 遇到速率限制，使用指数退避策略
                             self.api_key_manager.record_rate_limit(current_key)
 
-                            # 尝试切换到下一个 API KEY
-                            if self.api_key_manager.switch_to_next_key():
-                                logger.info(f"🔄 重试坐标 ({x}, {y})，使用新的 API KEY")
-                                await asyncio.sleep(0.5)  # 短暂延迟
+                            # 首次或前几次重试：等待后重试（不切换 KEY）
+                            if retry < max_retries - 1:
+                                wait_time = self.rate_limit_backoff * (2 ** retry)  # 指数退避
+                                logger.warning(f"⚠ 速率限制 (429) for ({x}, {y})，等待 {wait_time:.1f}s 后重试 ({retry + 1}/{max_retries})")
+                                await asyncio.sleep(wait_time)
                                 continue  # 重试请求
                             else:
-                                # 所有 API KEY 都已达到限制
-                                logger.error(f"❌ 所有 API KEY 都已达到速率限制，坐标 ({x}, {y}) 转换失败")
-                                self.failed_requests += 1
-                                return ((x, y), None)
+                                # 多次重试后仍然 429，尝试切换 API KEY
+                                logger.warning(f"⚠ 持续速率限制 (429) for ({x}, {y})，尝试切换 API KEY")
+                                if self.api_key_manager.switch_to_next_key():
+                                    logger.info(f"🔄 切换到新的 API KEY 并重试坐标 ({x}, {y})")
+                                    await asyncio.sleep(1.0)  # 切换后等待
+                                    continue  # 重试请求
+                                else:
+                                    # 所有 API KEY 都已达到限制
+                                    logger.error(f"❌ 所有 API KEY 都已达到速率限制，坐标 ({x}, {y}) 转换失败")
+                                    self.failed_requests += 1
+                                    return ((x, y), None)
 
                         else:
                             logger.error(f"✗ API status {response.status} for ({x}, {y})")

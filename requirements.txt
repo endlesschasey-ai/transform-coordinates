@@ -1,0 +1,8 @@
+# 数据处理
+pandas>=2.0.0
+
+# 异步 HTTP 请求
+aiohttp>=3.9.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
